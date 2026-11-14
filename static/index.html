@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#0b0e14">
+<title>FreeNeuro</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <button id="btn-chats" class="ic-btn" title="Чаты"></button>
+  <div id="chat-title" class="chat-title">FreeNeuro</div>
+  <button id="btn-settings" class="ic-btn" title="Настройки"></button>
+</header>
+<div class="toolbar">
+  <button id="btn-search" class="tb-btn" title="Поиск в чате"></button>
+  <button id="btn-sandbox" class="tb-btn" title="Песочница файлов"></button>
+  <button id="btn-memory" class="tb-btn" title="Память"></button>
+  <button id="btn-clear" class="tb-btn" title="Очистить чат"></button>
+  <span id="tb-model" class="tb-model">Авто</span>
+</div>
+<main id="chat" class="chat"></main>
+<div id="refine-banner" class="banner hidden">
+  <span class="banner-ic"></span>
+  <div class="banner-txt"><b>Уточнение промпта.</b> Опиши задачу — ИИ задаст вопросы и соберёт правильный промпт.</div>
+  <button id="btn-refine-off" class="ic-btn sm"></button>
+</div>
+<div id="attachments" class="attachments"></div>
+<div id="composer">
+  <div class="chips-row">
+    <div id="profile-chips" class="chips"></div>
+    <button id="btn-model" class="chip chip-model" title="Выбрать модель"></button>
+    <button id="btn-searchweb" class="ic-btn sm" title="Искать в интернете"></button>
+    <button id="btn-refine" class="ic-btn sm" title="Уточнить промпт"></button>
+  </div>
+  <div class="input-row">
+    <button id="btn-file" class="ic-btn sm" title="Прикрепить файлы"></button>
+    <button id="btn-photo" class="ic-btn sm" title="Фото из галереи"></button>
+    <button id="btn-sandbox-ins" class="ic-btn sm" title="Файл из песочницы"></button>
+    <textarea id="input" rows="1" placeholder="Сообщение…"></textarea>
+    <button id="btn-send" class="ic-btn send" title="Отправить"></button>
+  </div>
+</div>
+<input type="file" id="file-input" hidden multiple>
+<input type="file" id="photo-input" hidden accept="image/*" multiple>
+
+<div id="veil" class="veil hidden"></div>
+<div id="sheet" class="sheet hidden">
+  <div class="sheet-head">
+    <div id="sheet-title" class="sheet-title"></div>
+    <button id="sheet-close" class="ic-btn sm"></button>
+  </div>
+  <div id="sheet-body" class="sheet-body"></div>
+</div>
+
+<div id="modal-veil" class="veil hidden"></div>
+<div id="modal" class="modal hidden">
+  <div id="modal-title" class="modal-title"></div>
+  <input id="modal-input" class="modal-input" autocomplete="off">
+  <div id="modal-text" class="modal-text"></div>
+  <div class="modal-btns">
+    <button id="modal-cancel" class="btn ghost">Отмена</button>
+    <button id="modal-ok" class="btn">ОК</button>
+  </div>
+</div>
+
+<div id="preview-veil" class="veil hidden"><img id="preview-img" alt=""></div>
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

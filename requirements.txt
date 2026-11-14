@@ -1,0 +1,9 @@
+fastapi>=0.110,<0.113  # 0.113+ требует pydantic v2 (Rust) — не ставится на телефоне
+pydantic>=1.10,<2  # pydantic v1: чистый Python, ставится и на телефоне (Termux), v2 требует Rust
+uvicorn>=0.29  # без [standard]: обычный uvicorn работает и на телефоне (Termux), и на Render
+httpx>=0.27
+pypdf
+python-docx
+openpyxl
+python-pptx
+python-multipart
