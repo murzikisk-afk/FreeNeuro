@@ -16,7 +16,8 @@ MAX_IMG = 9 * 1024 * 1024    # 9 МБ на изображение для vision
 
 
 def chat_dir(chat_id: str) -> Path:
-    assert chat_id and CHAT_RE.match(chat_id), "неверный id чата"
+    if not (chat_id and CHAT_RE.match(chat_id)):
+        raise ValueError("неверный id чата")
     d = (SANDBOX_ROOT / chat_id)
     d.mkdir(parents=True, exist_ok=True)
     return d

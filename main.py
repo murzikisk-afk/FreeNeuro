@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """FreeNeuro API v3: чат (SSE), песочница файлов, память, сжатие, проверка кастомных моделей."""
-import json, os, time, urllib.parse
+import asyncio, json, os, shutil, time, urllib.parse
 from pathlib import Path
 
 import httpx
@@ -13,7 +13,17 @@ import tools
 import files as F
 from providers import chat_stream, generate_once
 
-app = FastAPI(title="FreeNeuro", version="1.2")
+app = FastAPI(title="FreeNeuro", version="1.5")
+
+
+@app.exception_handler(AssertionError)
+async def _bad_chat_id(request: Request, exc: AssertionError):
+    return JSONResponse({"ok": False, "msg": "неверный id чата"}, status_code=400)
+
+
+@app.exception_handler(ValueError)
+async def _bad_value(request: Request, exc: ValueError):
+    return JSONResponse({"ok": False, "msg": str(exc)}, status_code=400)
 BASE = Path(__file__).parent
 STATIC = BASE / "static"
 MAX_UPLOAD = 50 * 1024 * 1024  # 50 МБ
@@ -26,7 +36,7 @@ async def root():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "app": "FreeNeuro", "v": "1.2"}
+    return {"ok": True, "app": "FreeNeuro", "v": "1.5"}
 
 
 @app.get("/api/models")
@@ -40,7 +50,6 @@ async def models(refresh: int = 0):
 @app.get("/api/reset")
 async def reset():
     from providers import COOLDOWNS, MODEL_COOLDOWN
-    COLDOWNS_TMP = COOLDOWNS
     COOLDOWNS.clear()
     MODEL_COOLDOWN.clear()
     return {"ok": True}
@@ -147,7 +156,13 @@ async def sandbox_raw(chat: str = "default", path: str = ""):
         return JSONResponse({"ok": False, "msg": "не найден"}, status_code=404)
     if p.is_dir():
         return {"ok": False, "msg": "это папка"}
-    return FileResponse(p, media_type=F.mime_of(p))
+    mime = F.mime_of(p)
+    # файлы пользователя/ИИ нельзя исполнять в origin приложения (там лежат ключи в localStorage)
+    if mime in ("text/html", "image/svg+xml", "application/xhtml+xml") or p.suffix.lower() in (".html", ".htm", ".svg", ".xml"):
+        mime = "text/plain; charset=utf-8"
+    return FileResponse(p, media_type=mime, headers={
+        "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
+        "X-Content-Type-Options": "nosniff"})
 
 
 @app.delete("/api/sandbox")
@@ -157,6 +172,14 @@ async def sandbox_delete(chat: str = "default", path: str = ""):
         return {"ok": True}
     except Exception as e:
         return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+
+
+@app.delete("/api/sandbox/chat")
+async def sandbox_drop_chat(chat: str = ""):
+    """Удалить песочницу целого чата (когда чат удалён в приложении)."""
+    d = F.chat_dir(chat)
+    shutil.rmtree(d, ignore_errors=True)
+    return {"ok": True}
 
 
 @app.post("/api/sandbox/move")
@@ -201,31 +224,33 @@ async def chat(req: Request):
     F.chat_dir(chat_id)  # гарантируем песочницу
 
     async def gen():
-        queue = []
+        q: asyncio.Queue = asyncio.Queue()
 
         async def push(ev):
-            queue.append(ev)
-
-        task = None
+            await q.put(ev)
 
         async def run():
-            await chat_stream(payload, push)
-            queue.append({"t": "_end"})
+            try:
+                await chat_stream(payload, push)
+            except Exception as e:  # любая необработанная ошибка — в чат, а не в тишину
+                await q.put({"t": "error", "v": str(e) or e.__class__.__name__})
+            finally:
+                await q.put(None)
 
-        import asyncio
         task = asyncio.create_task(run())
-        while True:
-            if queue:
-                ev = queue.pop(0)
-                if ev.get("t") == "_end":
+        try:
+            while True:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"  # держим соединение живым (Render/прокси режут тишину)
+                    continue
+                if ev is None:
                     break
                 yield "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
-            elif task.done():
-                if task.exception():
-                    yield "data: " + json.dumps({"t": "error", "v": str(task.exception())}, ensure_ascii=False) + "\n\n"
-                break
-            else:
-                await asyncio.sleep(0.02)
+        finally:
+            if not task.done():
+                task.cancel()  # клиент нажал «стоп» или ушёл — не жжём лимиты впустую
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

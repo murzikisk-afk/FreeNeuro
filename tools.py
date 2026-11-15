@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Инструменты-агенты FreeNeuro: память, поиск, ссылки, код, песочница, сжатие."""
-import ast, json, os, re, time, urllib.parse, uuid
+import asyncio, ast, contextvars, ipaddress, json, os, re, socket, time, urllib.parse, uuid
 from pathlib import Path
 import httpx
 
@@ -128,9 +128,26 @@ def web_search(query, n=5):
     return "ничего не найдено"
 
 
+def _is_public_url(url):
+    """Не даём ИИ ходить во внутреннюю сеть сервера (localhost, 10.x, 192.168.x, метаданные облака)."""
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+        if not host:
+            return False
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def fetch_url(url):
     if not url.startswith(("http://", "https://")):
         return "нужен адрес http(s)://"
+    if not _is_public_url(url):
+        return "этот адрес закрыт (внутренняя сеть)"
     try:
         r = httpx.get(url, headers={"User-Agent": UA}, timeout=20, follow_redirects=True)
         if "text/html" in (r.headers.get("content-type") or ""):
@@ -144,7 +161,7 @@ def fetch_url(url):
         return f"не удалось открыть: {e}"
 
 
-def generate_image(prompt, width=1024, height=1024):
+def generate_image(prompt, width=1024, height=1024, chat_id=""):
     seed = int(time.time()) % 100000
     p = urllib.parse.quote(prompt[:900])
     u = f"https://image.pollinations.ai/prompt/{p}?width={width}&height={height}&nologo=true&seed={seed}"
@@ -152,10 +169,9 @@ def generate_image(prompt, width=1024, height=1024):
         r = httpx.get(u, timeout=120)
         if r.status_code == 200 and r.content[:2] != b"<!":
             fn = f"image_{int(time.time())}.jpg"
-            (F.SANDBOX_ROOT / "_shared").mkdir(parents=True, exist_ok=True)
-            (F.SANDBOX_ROOT / "_shared" / fn).write_bytes(r.content)
-            return json.dumps({"url": u, "file": fn},
-                              ensure_ascii=False)
+            if chat_id:
+                F.write_bytes(chat_id, fn, r.content)
+            return json.dumps({"url": u, "file": fn if chat_id else None}, ensure_ascii=False)
         return f"генерация не удалась (HTTP {r.status_code})"
     except Exception as e:
         return f"генерация не удалась: {e}"
@@ -174,7 +190,7 @@ def sandbox_list(path="", chat_id=""):
     if path:
         base = path.rstrip("/") + "/"
         rels = [r for r in rels if r.startswith(base)]
-    return "песочница:\n" + "\n".join("- " + r for r in rels[:80]) or "пусто"
+    return ("песочница:\n" + "\n".join("- " + r for r in rels[:80])) if rels else "песочница пуста"
 
 
 def sandbox_read(path, chat_id=""):
@@ -185,7 +201,7 @@ def sandbox_read(path, chat_id=""):
 
 
 def sandbox_write(path, content, chat_id=""):
-    if not path or "/" in path.lstrip("/") and ".." in path:
+    if not path or ".." in path.replace("\\", "/").split("/"):
         return "неверный путь"
     try:
         data = content.encode("utf-8")
@@ -244,15 +260,16 @@ TOOLS = [
 ]
 
 # события SSE: какие инструменты дают пользователю картинку/файл
-def tool_event(name, result):
+def tool_event(name, result, args=None):
     if name == "generate_image" and isinstance(result, str) and result.startswith("{"):
         try:
             d = json.loads(result)
             return {"t": "image", "url": d["url"], "file": d.get("file")}
         except Exception:
             return None
-    if name == "sandbox_share":
-        return {"t": "file", "path": result.split(" прикреплён")[0].replace("файл ", ""), "name": result.split("файл ")[1].split(" прикреплён")[0]}
+    if name == "sandbox_share" and isinstance(result, str) and "прикреплён" in result:
+        path = ((args or {}).get("path") or "").strip().lstrip("/")
+        return {"t": "file", "path": path, "name": path.split("/")[-1]}
     return None
 
 
@@ -265,21 +282,27 @@ def tools_schema():
 
 
 def tools_text():
-    lines = ["Доступные инструменты (вызывай только через ```tool JSON блок — ровно один вызов в блоке, больше ничего):"]
+    lines = ["Доступные инструменты (вызывай тегом <tool>{\"name\":\"...\",\"args\":{...}}</tool> — ровно один вызов за сообщение, больше ничего):"]
     for t in TOOLS:
         args = ", ".join(t["args"].keys()) if t["args"] else "без аргументов"
         lines.append(f"- {t['name']} ({args}): {t['desc']}")
     return "\n".join(lines)
 
 
-_CTX = {}
+_CTX_VAR = contextvars.ContextVar("fn_ctx", default=None)
+
+
+class _Ctx:
+    """Контекст запроса: у каждого чата свой, параллельные запросы не мешают друг другу."""
+    def get(self, k, d=None):
+        return (_CTX_VAR.get() or {}).get(k, d)
+
+
+_CTX = _Ctx()
 
 
 def set_ctx(chat_id, keys, send, generate):
-    _CTX["chat_id"] = chat_id
-    _CTX["keys"] = keys
-    _CTX["send"] = send
-    _CTX["generate"] = generate
+    _CTX_VAR.set({"chat_id": chat_id, "keys": keys, "send": send, "generate": generate})
 
 
 def _dispatch(name, args):
@@ -294,36 +317,17 @@ def _dispatch(name, args):
             return "неверный номер записи"
     if name == "memory_clear":
         return memory_clear()
-    if name == "memory_compress":
-        items = _mem_load()
-        if not items:
-            return "память и так пуста"
-        gen = _CTX.get("generate")
-        if not gen:
-            return "сжатие недоступно (нет генератора)"
-        cur = "\n".join(f"- {i['text']}" for i in items)
-        try:
-            new = gen(_CTX.get("keys") or {}, [
-                {"role": "user",
-                 "content": f"Сожми мою память: объедини повторяющиеся и похожие записи, удали устаревшее и неважное, сохрани все нужные факты о пользователе. Ответь ТОЛЬКО списком строк в формате JSON: [\"факт 1\", \"факт 2\", ...]. Не больше 25 записей.\n\nТекущая память:\n{cur}"}],
-                system="Ты — компрессор памяти. Отвечай строго JSON-списком строк.",
-                temperature=0.2)
-            arr = json.loads(re.sub(r"^```[a-z]*\s*|\s*```$", "", new.strip(), flags=re.S))
-            arr = [str(x).strip()[:400] for x in arr if str(x).strip()]
-            _mem_save([{"text": t, "ts": int(time.time())} for t in arr[:25]])
-            return f"память сжата: было {len(items)}, стало {len(arr)} записей"
-        except Exception as e:
-            return f"сжатие не удалось: {e}"
     if name == "web_search":
         return web_search(args.get("query", ""), args.get("n") or 5)
     if name == "fetch_url":
         return fetch_url(args.get("url", ""))
     if name == "generate_image":
         try:
-            return generate_image(args.get("prompt", ""), int(args.get("width") or 1024),
-                                  int(args.get("height") or 1024))
+            w = max(256, min(2048, int(args.get("width") or 1024)))
+            h = max(256, min(2048, int(args.get("height") or 1024)))
+            return generate_image(args.get("prompt", ""), w, h, cid)
         except Exception:
-            return generate_image(args.get("prompt", ""))
+            return generate_image(args.get("prompt", ""), chat_id=cid)
     if name == "calc":
         return calc(args.get("expr", ""))
     if name == "make_link":
@@ -341,30 +345,41 @@ def _dispatch(name, args):
     return f"инструмент {name} не найден"
 
 
-async def execute_tool(name, args):
-    """Выполняет инструмент. Возвращает строку или {"text":..., "images":[...]}"""
+async def _memory_compress():
+    items = _mem_load()
+    if not items:
+        return "память и так пуста"
+    gen = _CTX.get("generate")
+    if not gen:
+        return "сжатие недоступно (нет генератора)"
+    cur = "\n".join(f"- {i['text']}" for i in items)
     try:
-        res = _dispatch(name, args)
-        send = _CTX.get("send")
-        if send:
-            await send({"t": "tool", "name": name})
-        ev = tool_event(name, res)
-        if ev:
-            await send(ev)
-        return res
+        new = await gen(_CTX.get("keys") or {}, [
+            {"role": "user",
+             "content": f"Сожми мою память: объедини повторяющиеся и похожие записи, удали устаревшее и неважное, сохрани все нужные факты о пользователе. Ответь ТОЛЬКО списком строк в формате JSON: [\"факт 1\", \"факт 2\", ...]. Не больше 25 записей.\n\nТекущая память:\n{cur}"}],
+            system="Ты — компрессор памяти. Отвечай строго JSON-списком строк.",
+            temperature=0.2)
+        arr = json.loads(re.sub(r"^```[a-z]*\s*|\s*```$", "", new.strip(), flags=re.S))
+        arr = [str(x).strip()[:400] for x in arr if str(x).strip()]
+        _mem_save([{"text": t, "ts": int(time.time())} for t in arr[:25]])
+        return f"память сжата: было {len(items)}, стало {len(arr)} записей"
     except Exception as e:
-        return f"ошибка инструмента {name}: {e}"
+        return f"сжатие не удалось: {e}"
 
 
-async def execute_tool_native(name, args):
+async def execute_tool(name, args):
+    """Выполняет инструмент (в потоке — сеть не блокирует сервер). Возвращает строку или {"text":..., "images":[...]}"""
     try:
-        res = _dispatch(name, args)
         send = _CTX.get("send")
         if send:
             await send({"t": "tool", "name": name})
-            ev = tool_event(name, res)
-            if ev:
-                await send(ev)
+        if name == "memory_compress":
+            res = await _memory_compress()
+        else:
+            res = await asyncio.to_thread(_dispatch, name, args)
+        ev = tool_event(name, res, args)
+        if ev and send:
+            await send(ev)
         return res
     except Exception as e:
         return f"ошибка инструмента {name}: {e}"

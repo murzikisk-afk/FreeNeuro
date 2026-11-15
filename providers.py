@@ -16,18 +16,22 @@ MAX_OUT_TOKENS = 4096
 DEFAULT_SYSTEM = (
     "Ты — FreeNeuro, бесплатный ИИ-помощник на русском языке. "
     "Отвечай на языке пользователя, по делу и по шагам там, где это нужно.\n"
-    "У тебя есть ИНСТРУМЕНТЫ (агентские): память, поиск в интернете, чтение страниц, "
-    "калькулятор, генерация картинок и ПЕСОЧНИЦА с файлами пользователя (sandbox_*).\n"
-    "Правила инструментов: вызывай их при необходимости через ```tool JSON блок — ровно ОДИН вызов в блоке, "
-    "только имя и аргументы, без пояснений. После ответа инструмента продолжай решать задачу. "
-    "Песочницу читай инструментом sandbox_read — он понимает PDF, DOCX, XLSX, PPTX, код и картинки.\n"
-    "Важное о пользователе держи в памяти (memory_add). Память сжимай инструментом memory_compress, "
-    "когда записей стало много.\n"
-    "Прежде чем давать окончательный ответ на НЕЯСНУЮ или НЕПОЛНУЮ задачу, задай 1-2 коротких "
-    "уточняющих вопроса — это лучше, чем гадать.\n"
-    "Ссылки оформляй в markdown [текст](адрес). Код — в ``` блоках с языком. "
-    "Не упоминай, что у тебя есть инструменты — просто используй их.\n"
-    "Сейчас: " + time.strftime("%d.%m.%Y, %H:%M") + " (UTC).")
+    "У тебя есть ИНСТРУМЕНТЫ: память (memory_add, memory_remove, memory_clear, memory_compress), "
+    "поиск в интернете (web_search), чтение страниц (fetch_url), калькулятор (calc), "
+    "генерация картинок (generate_image) и песочница с файлами пользователя "
+    "(sandbox_list, sandbox_read, sandbox_write, sandbox_share, sandbox_delete).\n"
+    "Как вызвать инструмент: напиши тег tool, внутри — JSON с полями name и args. "
+    "Например: <tool>{\"name\":\"calc\",\"args\":{\"expr\":\"2+2\"}}</tool>. "
+    "Ровно ОДИН вызов за сообщение, только тег, без пояснений вокруг.\n"
+    "После результата инструмента продолжай решать задачу и доведи её до окончательного ответа.\n"
+    "Песочница: sandbox_read читает файлы пользователя — PDF, DOCX, XLSX, PPTX, код и картинки.\n"
+    "Важное о пользователе запоминай через memory_add; когда записей много — memory_compress.\n"
+    "Если задача неясная или неполная — сначала задай 1-2 коротких уточняющих вопроса, не гадай.\n"
+    "Ссылки оформляй в markdown: [текст](адрес). Не упоминай инструменты — просто используй их.\n")
+
+
+def default_system():
+    return DEFAULT_SYSTEM + "Сейчас: " + time.strftime("%d.%m.%Y, %H:%M", time.gmtime()) + " (UTC)."
 
 REFINE_SYSTEM = (
     "Ты — мастер промптов. Пользователь описал задачу. НЕ решай её. "
@@ -91,6 +95,26 @@ def parse_delta(chunk):
 
 
 def _extract_text(d):
+    """Текст из дельты (content). reasoning-поток игнорируем."""
+    try:
+        return d["choices"][0]["delta"].get("content") or ""
+    except Exception:
+        return ""
+
+
+def _native_tool_delta(d):
+    """Дельта нативного вызова инструмента: [(index, name, arguments)]. """
+    out = []
+    try:
+        for tc in d.get("choices", [{}])[0].get("delta", {}).get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            out.append((tc.get("index", 0), fn.get("name") or "", fn.get("arguments") or ""))
+    except Exception:
+        pass
+    return out
+
+
+def _extract_text__legacy(d):
     try:
         c = d["choices"][0]
         if c.get("delta") and c["delta"].get("content"):
@@ -102,13 +126,60 @@ def _extract_text(d):
     return ""
 
 
+
+
+def _tool_gate():
+    """Прячет блоки <tool>...</tool> от клиента: дельты внутри блока не уходят в чат."""
+    st = {"in_tool": False, "buf": ""}
+
+    def feed(t):
+        st["buf"] += t
+        out = ""
+        while True:
+            low = st["buf"].lower()
+            if not st["in_tool"]:
+                idx = low.find("<tool")
+                if idx == -1:
+                    keep = len(st["buf"])
+                    for n in (5, 4, 3, 2, 1):  # хвост может быть началом тега — придерживаем
+                        if "<tool".startswith(low[-n:]):
+                            keep = len(st["buf"]) - n
+                            break
+                    out += st["buf"][:keep]
+                    st["buf"] = st["buf"][keep:]
+                    break
+                out += st["buf"][:idx]
+                st["buf"] = st["buf"][idx:]
+                st["in_tool"] = True
+            else:
+                end = low.find("</tool>")
+                if end == -1:
+                    break
+                st["buf"] = st["buf"][end + len("</tool>"):]
+                st["in_tool"] = False
+        return out
+
+    def flush():
+        return "" if st["in_tool"] else st["buf"]
+
+    return feed, flush
+
 async def stream_openai(pair, messages, system, temperature, has_images, send, max_tokens=MAX_OUT_TOKENS):
     url = pair["url"].rstrip("/") + "/chat/completions"
     headers = {"Content-Type": "application/json"}
     if pair.get("key"):
         headers["Authorization"] = f"Bearer {pair['key']}"
+    if pair["provider"] == "openrouter":
+        headers["HTTP-Referer"] = "https://freeneuro.app"
+        headers["X-Title"] = "FreeNeuro"
     body = {"model": pair.get("api_model") or pair["model"], "messages": messages, "stream": True,
             "temperature": temperature, "max_tokens": max_tokens}
+    if pair["provider"] == "pollinations":
+        try:
+            body["tools"] = [{"type": "function", "function": f} for f in tools.tools_schema()]
+            body["tool_choice"] = "auto"
+        except Exception:
+            pass
     if system:
         body["messages"] = [{"role": "system", "content": system}] + body["messages"]
     async with httpx.AsyncClient(timeout=300) as c:
@@ -121,6 +192,8 @@ async def stream_openai(pair, messages, system, temperature, has_images, send, m
                     pass
                 raise ProviderError(f"HTTP {r.status_code}: {err}", r.status_code, err)
             acc = []
+            feed, flush = _tool_gate()
+            tc_acc = {}
             async for line in r.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
@@ -130,27 +203,88 @@ async def stream_openai(pair, messages, system, temperature, has_images, send, m
                 d = parse_delta(data)
                 if not d:
                     continue
+                if isinstance(d, dict) and d.get("error"):
+                    er = d["error"]
+                    msg = er.get("message") if isinstance(er, dict) else str(er)
+                    code = er.get("code") if isinstance(er, dict) else 0
+                    raise ProviderError(f"{msg}", code if isinstance(code, int) else 0, str(msg))
+                for idx, name, args in _native_tool_delta(d):
+                    slot = tc_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                    if name:
+                        slot["name"] = name
+                    if args:
+                        slot["args"] += args
+                try:
+                    for tc in d.get("choices", [{}])[0].get("delta", {}).get("tool_calls") or []:
+                        if tc.get("id"):
+                            slot = tc_acc.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
+                            slot["id"] = tc["id"]
+                except Exception:
+                    pass
                 t = _extract_text(d)
                 if t:
                     acc.append(t)
-                    await send({"t": "delta", "v": t})
+                    vis = feed(t)
+                    if vis:
+                        await send({"t": "delta", "v": vis})
+            tail = flush()
+            if tail:
+                await send({"t": "delta", "v": tail})
+    if tc_acc:
+        first = tc_acc[min(tc_acc)]
+        name, args = first["name"], {}
+        try:
+            obj = json.loads(first["args"]) if first["args"].strip() else {}
+        except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            if not name and obj.get("name"):
+                name = obj["name"]
+            if obj.get("args") or obj.get("arguments"):
+                args = obj.get("args") or obj.get("arguments") or {}
+            else:
+                args = obj
+        if name:
+            pair["_native"] = {"id": first["id"] or "call_0", "type": "function",
+                               "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+            return "".join(acc) + "<tool>" + json.dumps({"name": name, "args": args}, ensure_ascii=False) + "</tool>"
     return "".join(acc)
 
 
+def _gemini_contents(messages):
+    """OpenAI-подобные сообщения -> contents Gemini (роли user/model, parts), склейка соседних."""
+    out = []
+    for m in messages:
+        role = "model" if m.get("role") == "assistant" else "user"
+        content = m.get("content")
+        if isinstance(content, list) and content and "type" not in content[0]:
+            parts = content  # уже в формате Gemini (prepare_messages)
+        else:
+            parts = to_gemini_parts(content)
+        parts = [p for p in parts if p.get("text") or p.get("inline_data")]
+        if not parts:
+            continue
+        if out and out[-1]["role"] == role:
+            out[-1]["parts"].extend(parts)
+        else:
+            out.append({"role": role, "parts": list(parts)})
+    if out and out[0]["role"] != "user":
+        out.insert(0, {"role": "user", "parts": [{"text": "(начало диалога)"}]})
+    return out
+
+
 async def stream_gemini(pair, messages, system, temperature, has_images, send, max_tokens=MAX_OUT_TOKENS):
-    url = (pair["url"].rstrip("/") or "https://generativelanguage.googleapis.com/v1beta/models") + "/models/" + pair["model"] + ":streamGenerateContent"
-    if "?" not in url and pair.get("key"):
-        url += "?key=" + pair["key"]
-    elif pair.get("key") and "key=" not in url:
-        url += ("&" if "?" in url else "?") + "key=" + pair["key"]
-    sys_inst = {"parts": [{"text": (system or "")}]} if system else None
-    contents = [m for m in messages if m["role"] in ("user", "assistant")]
-    body = {"contents": contents,
+    base = (pair.get("url") or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+    url = f"{base}/models/{pair['model']}:streamGenerateContent?alt=sse"
+    headers = {"Content-Type": "application/json"}
+    if pair.get("key"):
+        headers["x-goog-api-key"] = pair["key"]
+    body = {"contents": _gemini_contents(messages),
             "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}}
-    if sys_inst:
-        body["systemInstruction"] = sys_inst
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
     async with httpx.AsyncClient(timeout=300) as c:
-        async with c.stream("POST", url, json=body) as r:
+        async with c.stream("POST", url, headers=headers, json=body) as r:
             if r.status_code != 200:
                 err = ""
                 try:
@@ -159,19 +293,29 @@ async def stream_gemini(pair, messages, system, temperature, has_images, send, m
                     pass
                 raise ProviderError(f"HTTP {r.status_code}: {err}", r.status_code, err)
             acc = []
+            feed, flush = _tool_gate()
             async for line in r.aiter_lines():
-                if not line.strip() or line.startswith("["):
+                line = line.strip()
+                if not line.startswith("data:"):
                     continue
-                d = parse_delta(line)
+                d = parse_delta(line[5:].strip())
                 if not d:
                     continue
+                t = ""
                 try:
-                    t = d["candidates"][0]["content"]["parts"][0].get("text", "")
+                    for part in d["candidates"][0]["content"].get("parts", []):
+                        if not part.get("thought"):
+                            t += part.get("text", "")
                 except Exception:
                     t = ""
                 if t:
                     acc.append(t)
-                    await send({"t": "delta", "v": t})
+                    vis = feed(t)
+                    if vis:
+                        await send({"t": "delta", "v": vis})
+            tail = flush()
+            if tail:
+                await send({"t": "delta", "v": tail})
     return "".join(acc)
 
 
@@ -363,6 +507,14 @@ def prepare_messages(msgs, provider):
     out = []
     for m in msgs:
         role = m.get("role", "user")
+        if role == "tool" and provider != "gemini":
+            out.append({"role": "tool", "tool_call_id": m.get("tool_call_id", "call_0"),
+                        "content": str(m.get("content", ""))})
+            continue
+        if role == "assistant" and provider != "gemini" and m.get("tool_calls"):
+            out.append({"role": "assistant", "content": m.get("content") or None,
+                        "tool_calls": m["tool_calls"]})
+            continue
         content = to_openai_content(m.get("content", "")) if provider != "gemini" else to_gemini_parts(m.get("content", ""))
         if not content:
             continue
@@ -372,14 +524,15 @@ def prepare_messages(msgs, provider):
 
 # ---------- вставка файлов из песочницы в сообщение ----------
 def attach_sandbox_files(msgs, files, chat_id):
-    """Прикреплённые файлы: картинки -> vision, текст -> извлечение. Как у современных нейросетей."""
+    """Прикреплённые файлы: картинки -> vision, текст -> извлечение. Всегда возвращает список частей."""
     if not msgs or not files:
         return msgs
     last = msgs[-1]
     content = last.get("content", "")
-    parts = [{"type": "text", "text": content}] if isinstance(content, str) and content else []
     if isinstance(content, list):
-        parts = content
+        parts = list(content)
+    else:
+        parts = [{"type": "text", "text": content}] if content else []
     notes = []
     for rel in files:
         try:
@@ -392,20 +545,18 @@ def attach_sandbox_files(msgs, files, chat_id):
                 parts.append({"type": "text", "text": f"СОДЕРЖИМОЕ ФАЙЛА {rel}:\n{text}"})
         except Exception as e:
             notes.append(f"{rel}: {e}")
-    if not isinstance(content, str) or not content:
-        parts = [p for p in parts if p.get("text") or p.get("type") == "image_url"]
-    last["content"] = parts if len(parts) > 1 else (parts[0] if parts else "")
     if notes:
-        last["content"] = (last["content"] if isinstance(last["content"], str) else " ".join(p.get("text", "") for p in parts)) \
-            + "\n\n[замечания: " + "; ".join(notes) + "]"
+        parts.append({"type": "text", "text": "[замечания: " + "; ".join(notes) + "]"})
+    last["content"] = parts
     return msgs
 
 
-TOOL_PAT = re.compile(r"```tool\s*\n(.*?)```", re.S)
+TOOL_PAT = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.S)
+TOOL_PAT_LEGACY = re.compile(r"```tool\s*\n(.*?)```", re.S)
 
 
 def parse_tool_block(text):
-    m = TOOL_PAT.search(text or "")
+    m = TOOL_PAT.search(text or "") or TOOL_PAT_LEGACY.search(text or "")
     if not m:
         return None
     raw = m.group(1).strip()
@@ -414,7 +565,7 @@ def parse_tool_block(text):
         return {"name": obj.get("name"), "args": obj.get("args") or obj.get("arguments") or {}}
     except Exception:
         try:
-            obj = ast.literal_eval(raw) if False else json.loads(re.sub(r"'", '"', raw))
+            obj = json.loads(re.sub(r"'", '"', raw))
         except Exception:
             return None
     if isinstance(obj, dict):
@@ -442,8 +593,15 @@ async def run_agent(pair, messages, system, temperature, has_images, send, chat_
             return text
         name, args = tb["name"], tb.get("args") or {}
         # удаляем блок из текста (он уже отправлен в SSE, но в истории оставим чистый)
-        clean = TOOL_PAT.sub("", text).strip()
+        clean = TOOL_PAT.sub("", TOOL_PAT_LEGACY.sub("", text)).strip()
         res = await tools.execute_tool(name, args)
+        native = pair.pop("_native", None) if pair.get("provider") == "pollinations" else None
+        if native and not (isinstance(res, dict) and res.get("images")):
+            res_text = res if isinstance(res, str) else str(res)
+            hist.append({"role": "assistant", "content": clean or None,
+                         "tool_calls": [native]})
+            hist.append({"role": "tool", "tool_call_id": native["id"], "content": res_text})
+            continue
         if isinstance(res, dict) and res.get("images"):
             hist.append({"role": "assistant", "content": clean or f"[вызов инструмента {name}]"})
             parts = [{"type": "text", "text": f"[инструмент {name}]: {res.get('text', '')}"}]
@@ -453,6 +611,10 @@ async def run_agent(pair, messages, system, temperature, has_images, send, chat_
         else:
             hist.append({"role": "assistant", "content": clean or f"[вызов инструмента {name}]"})
             hist.append({"role": "user", "content": f"[результат инструмента {name}]:\n{res}"})
+    # лимит раундов исчерпан — просим итог без инструментов
+    hist.append({"role": "user", "content": "Хватит вызывать инструменты. Дай окончательный ответ по уже полученным данным."})
+    text = await stream_call(pair, prepare_messages(hist, pair["provider"]), system, temperature, has_images, send)
+    return TOOL_PAT.sub("", TOOL_PAT_LEGACY.sub("", text or "")).strip()
 
 
 async def chat_stream(payload, send):
@@ -466,7 +628,11 @@ async def chat_stream(payload, send):
     keys = payload.get("keys") or {}
     chat_id = payload.get("chat") or "default"
     prefs = payload.get("model_prefs")
-    temperature = float(payload.get("temperature", 0.7) or 0.7)
+    try:
+        temperature = float(payload.get("temperature"))
+    except (TypeError, ValueError):
+        temperature = 0.7
+    temperature = max(0.0, min(2.0, temperature))
 
     # --- файлы из песочницы в последнее сообщение ---
     files = payload.get("files") or []
@@ -482,7 +648,7 @@ async def chat_stream(payload, send):
     if payload.get("refine"):
         system = REFINE_SYSTEM
     else:
-        system = (payload.get("system") or "").strip() or DEFAULT_SYSTEM
+        system = (payload.get("system") or "").strip() or default_system()
     summary = (payload.get("summary") or "").strip()
     if summary and not payload.get("refine"):
         system += "\n\nКРАТКОЕ СОДЕРЖАНИЕ РАННЕГО ДИАЛОГА (пользователь не видит его):\n" + summary[:1500]
@@ -501,7 +667,7 @@ async def chat_stream(payload, send):
             lc = messages[-1].get("content")
             if isinstance(lc, list):
                 lc = " ".join(x.get("text", "") for x in lc if isinstance(x, dict))
-            res = tools.web_search(str(lc or payload.get("search")), 5)
+            res = await asyncio.to_thread(tools.web_search, str(lc or ""), 5)
             if res:
                 messages[-1]["content"] = (messages[-1].get("content") or "") + "\n\nРЕЗУЛЬТАТЫ ПОИСКА:\n" + res
         except Exception:
@@ -510,7 +676,13 @@ async def chat_stream(payload, send):
     # --- кандидаты ---
     pairs = build_candidates(model_sel, keys, has_images, prefs)
     if not pairs:
-        await send({"t": "error", "v": "все модели недоступны или выключены в настройках"})
+        if has_images:
+            msg = "нет доступной модели, которая видит картинки: добавь ключ Gemini или включи vision-модель в настройках"
+        elif model_sel not in ("auto", "light", "strong") and not model_sel.startswith("custom:"):
+            msg = "для выбранной модели нет ключа или она на паузе — добавь ключ в настройках или выбери «Авто»"
+        else:
+            msg = "все модели недоступны или выключены в настройках (добавь ключи или подожди — лимиты сбрасываются)"
+        await send({"t": "error", "v": msg})
         return
 
     first = True
@@ -521,6 +693,8 @@ async def chat_stream(payload, send):
         async def ws(ev):
             if ev.get("t") in ("tool", "image", "file", "search"):
                 emitted["any"] = True
+            if ev.get("t") == "delta":
+                emitted["text"] = True
             await send(ev)
 
         # pollinations бывает отдаёт пустой поток — даём ему вторую попытку
@@ -534,12 +708,12 @@ async def chat_stream(payload, send):
                                 "fallback": first and p["model"] == pairs[-1]["model"]})
                     first = False
                 else:
-                    await send({"t": "switch", "from": prev_model, "to": p["model"],
+                    await send({"t": "switch", "from": prev_model, "to": p["m"].get("name", p["model"]),
                                 "reason": "failover", "detail": errors[-1] if errors else ""})
                 text = await run_agent(p, messages, system, temperature, has_images, ws, chat_id, keys)
                 if not (text or "").strip() and not emitted["any"]:
                     raise ProviderError("пустой ответ модели")
-                await send({"t": "done", "id": p["model"],
+                await send({"t": "done", "id": p["model"], "name": p["m"].get("name", p["model"]),
                             "fallback": p["model"] == pairs[-1]["model"] and len(pairs) > 1})
                 return
             except Exception as e:
@@ -551,6 +725,9 @@ async def chat_stream(payload, send):
                     continue
                 rate_limit(p, why)
                 errors.append(f"{p['model']}: {str(e)[:120]}")
+                if emitted.get("text"):
+                    await send({"t": "reset"})  # клиент сотрёт недописанный ответ упавшей модели
+                    emitted["text"] = False
                 if why in ("auth", "quota", "gone"):
                     break
                 await asyncio.sleep(1)

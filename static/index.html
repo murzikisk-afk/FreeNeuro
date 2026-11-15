@@ -3,18 +3,31 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<meta name="theme-color" content="#0b0e14">
+<meta name="theme-color" content="#0a0b10">
+<meta name="color-scheme" content="dark light">
 <title>FreeNeuro</title>
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="icon" href="/static/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<div class="glow g1"></div>
+<div class="glow g2"></div>
+
 <header class="topbar">
-  <button id="btn-chats" class="ic-btn" title="Чаты"></button>
-  <div id="chat-title" class="chat-title">FreeNeuro</div>
-  <button id="btn-settings" class="ic-btn" title="Настройки"></button>
+  <div class="top-in">
+    <button id="btn-chats" class="ic-btn" title="Чаты"></button>
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="7.5" cy="12" r="2.4"/><circle cx="17" cy="7" r="1.9"/><circle cx="17" cy="17" r="1.9"/>
+        <path d="M9.6 10.9L15.2 8.1M9.6 13.1L15.2 15.9"/>
+      </svg>
+    </div>
+    <div id="chat-title" class="chat-title">FreeNeuro</div>
+    <button id="btn-settings" class="ic-btn" title="Настройки"></button>
+  </div>
 </header>
+
 <div class="toolbar">
   <button id="btn-search" class="tb-btn" title="Поиск в чате"></button>
   <button id="btn-sandbox" class="tb-btn" title="Песочница файлов"></button>
@@ -22,33 +35,44 @@
   <button id="btn-clear" class="tb-btn" title="Очистить чат"></button>
   <span id="tb-model" class="tb-model">Авто</span>
 </div>
+
 <main id="chat" class="chat"></main>
+
+<button id="btn-down" class="fab hidden" title="Вниз"></button>
+
 <div id="refine-banner" class="banner hidden">
-  <span class="banner-ic"></span>
+  <span class="banner-ic" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 6.5L4 4M7 4v2.5M6 6.5H3.5M5.5 4.5l1.5-1.5"/><path d="M5 19L15 9l.9.9L5.9 19.9z"/><path d="M19 5l-1.1 1.1M16.4 8.6l.9 1.9 1.9.9-1.9.9-.9 1.9-.9-1.9-1.9-.9 1.9-.9z"/></svg>
+  </span>
   <div class="banner-txt"><b>Уточнение промпта.</b> Опиши задачу — ИИ задаст вопросы и соберёт правильный промпт.</div>
   <button id="btn-refine-off" class="ic-btn sm"></button>
 </div>
+
 <div id="attachments" class="attachments"></div>
+
 <div id="composer">
-  <div class="chips-row">
-    <div id="profile-chips" class="chips"></div>
-    <button id="btn-model" class="chip chip-model" title="Выбрать модель"></button>
-    <button id="btn-searchweb" class="ic-btn sm" title="Искать в интернете"></button>
-    <button id="btn-refine" class="ic-btn sm" title="Уточнить промпт"></button>
-  </div>
-  <div class="input-row">
-    <button id="btn-file" class="ic-btn sm" title="Прикрепить файлы"></button>
-    <button id="btn-photo" class="ic-btn sm" title="Фото из галереи"></button>
-    <button id="btn-sandbox-ins" class="ic-btn sm" title="Файл из песочницы"></button>
-    <textarea id="input" rows="1" placeholder="Сообщение…"></textarea>
-    <button id="btn-send" class="ic-btn send" title="Отправить"></button>
+  <div class="composer-in">
+    <div class="chips-row">
+      <div id="profile-chips" class="chips"></div>
+      <button id="btn-model" class="chip chip-model" title="Выбрать модель"></button>
+      <button id="btn-searchweb" class="ic-btn sm" title="Искать в интернете"></button>
+      <button id="btn-refine" class="ic-btn sm" title="Уточнить промпт"></button>
+    </div>
+    <div class="input-row">
+      <button id="btn-file" class="ic-btn sm" title="Прикрепить файлы"></button>
+      <button id="btn-photo" class="ic-btn sm" title="Фото из галереи"></button>
+      <button id="btn-sandbox-ins" class="ic-btn sm" title="Файл из песочницы"></button>
+      <textarea id="input" rows="1" placeholder="Сообщение…" enterkeyhint="enter" autocapitalize="sentences"></textarea>
+      <button id="btn-send" class="ic-btn send" title="Отправить"></button>
+    </div>
   </div>
 </div>
+
 <input type="file" id="file-input" hidden multiple>
 <input type="file" id="photo-input" hidden accept="image/*" multiple>
 
 <div id="veil" class="veil hidden"></div>
-<div id="sheet" class="sheet hidden">
+<div id="sheet" class="sheet hidden" role="dialog" aria-modal="true">
   <div class="sheet-head">
     <div id="sheet-title" class="sheet-title"></div>
     <button id="sheet-close" class="ic-btn sm"></button>
@@ -57,7 +81,7 @@
 </div>
 
 <div id="modal-veil" class="veil hidden"></div>
-<div id="modal" class="modal hidden">
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true">
   <div id="modal-title" class="modal-title"></div>
   <input id="modal-input" class="modal-input" autocomplete="off">
   <div id="modal-text" class="modal-text"></div>
